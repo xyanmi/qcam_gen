@@ -1,0 +1,78 @@
+i see a cat.
+i see a dog.
+i see a bird.
+i see the sun.
+i see the moon.
+you see a cat.
+you see a dog.
+you see a bird.
+we see the sun.
+we see the moon.
+he sees a cat.
+she sees a dog.
+it is a cat.
+it is a dog.
+it is a bird.
+it is a fish.
+the cat is big.
+the cat is small.
+the dog is big.
+the dog is small.
+the bird is red.
+the bird is blue.
+the fish is red.
+the fish is blue.
+i like the cat.
+i like the dog.
+i like the bird.
+you like the cat.
+you like the dog.
+she likes the cat.
+he likes the dog.
+we like the sun.
+we like the moon.
+i have a pen.
+i have a book.
+i have a cup.
+you have a pen.
+you have a book.
+she has a cup.
+he has a pen.
+we have a car.
+they have a bus.
+the car is red.
+the car is blue.
+the bus is big.
+the bus is slow.
+can you run?
+can you walk?
+can i go?
+can we go?
+can he go?
+can you go?
+do you like it?
+do i like it?
+does she run?
+does he walk?
+the sky is blue.
+the sun is hot.
+the water is cold.
+apple is red.
+apple is sweet.
+i eat an apple.
+you eat an apple.
+he eats food.
+she eats food.
+the cat eats.
+the dog eats.
+i drink water.
+you drink water.
+he drinks water.
+she drinks tea.
+i am happy.
+you are happy.
+he is happy.
+she is happy.
+we are happy.
+she is sad.
+we are sad.

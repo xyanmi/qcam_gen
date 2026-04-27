@@ -1,0 +1,8 @@
+title = "Data Configuration"
+
+[bs4]
+name="bs4"
+path="./data/bs30.data"
+savepath="./results/bs4/"
+features=16
+L=4

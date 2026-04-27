@@ -1,0 +1,30 @@
+title = "Data Configuration"
+
+[aiseq128]
+name="aiseq128"
+path = "./data/aiseq128"
+savepath="./results/aiseq128/"
+length = 100
+qubits = 5
+
+[mnist14]
+name="mnist14"
+path = "./data/mnist14"
+savepath="./results/mnist14/"
+length = 49
+qubits = 4
+
+[genseq]
+name="genseq"
+path = "./data/genseq"
+savepath="./results/genseq/"
+length = 36
+qubits = 5
+
+
+[easyseq]
+name="easyseq"
+path = "./data/easyseq"
+savepath="./results/easyseq/"
+length = 20
+qubits = 5
