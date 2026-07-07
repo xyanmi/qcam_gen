@@ -174,23 +174,17 @@ class Circuit(nn.Module):
         # outcomes shape: (b, num_qubits)
         batch_size = states.shape[0]
         
-        # 创建一个与 states 相同形状的掩码，初始为0
         projection_mask = torch.zeros_like(states, dtype=torch.bool)
-        
-        # 使用高级索引，将与 outcomes 匹配的位置设为 True
+
         batch_indices = torch.arange(batch_size, device=states.device)
         indices = (batch_indices,) + tuple(outcomes[:, i] for i in range(self.num_qubits))
         projection_mask[indices] = True
         
-        # 应用掩码，只保留塌缩方向的分量
         unnormalized_states = states * projection_mask.to(states.dtype)
-        
-        # 计算范数用于归一化
+
         # sum over all qubit dimensions (dims 1 to n)
         norm_dims = list(range(1, states.dim()))
         norms = torch.sqrt(torch.sum(unnormalized_states.abs()**2, dim=norm_dims, keepdim=True))
-        
-        # 加上一个很小的值避免除以零
         collapsed_states = unnormalized_states / (norms + 1e-12)
         
         return collapsed_states

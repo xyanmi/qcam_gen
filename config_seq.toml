@@ -1,30 +1,23 @@
 title = "Data Configuration"
 
-[aiseq128]
-name="aiseq128"
-path = "./data/aiseq128"
-savepath="./results/aiseq128/"
+[sequence128]
+name="sequence128"
+path = "./data/sequence128"
+savepath="./results/sequence128/"
 length = 100
 qubits = 5
 
-[mnist14]
-name="mnist14"
-path = "./data/mnist14"
-savepath="./results/mnist14/"
-length = 49
-qubits = 4
-
-[genseq]
-name="genseq"
-path = "./data/genseq"
-savepath="./results/genseq/"
+[asvo]
+name="asvo"
+path = "./data/asvo"
+savepath="./results/asvo/"
 length = 36
 qubits = 5
 
 
-[easyseq]
-name="easyseq"
-path = "./data/easyseq"
-savepath="./results/easyseq/"
+[sequence78]
+name="sequence78"
+path = "./data/sequence78"
+savepath="./results/sequence78/"
 length = 20
 qubits = 5
