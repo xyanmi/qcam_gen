@@ -5,10 +5,12 @@ import numpy as np
 from tqdm import tqdm
 import os
 from models import text as text_module
+import torch.nn.functional as F
 
 def set_args():
     parser = argparse.ArgumentParser()
     parser.add_argument('--trainer', action='store_true', help='Whether to train the model')
+    parser.add_argument('--distill', action='store_true', help='Whether to distill a GPT2 teacher into the student model')
     parser.add_argument('--sampler', action='store_true', help='Whether to sample from the trained model')
     parser.add_argument('--tester', action='store_true', help='Whether to test the trained model on saved generated text')
 
@@ -25,6 +27,11 @@ def set_args():
     parser.add_argument('--show', type=int, default=1, help='the interval to show training loss')
     parser.add_argument('--SAVE_PATH', type=str, default='./LongtextResults/', help='Path to save training results and checkpoints')
     parser.add_argument('--text', type=str, default='', help='the decription of the this test')
+    parser.add_argument('--teacher', type=str, default='LongtextResults/gpt2', help='Path to the GPT2 teacher')
+    parser.add_argument('--student', type=str, default='default', help='Student path, or default to create a new model')
+    parser.add_argument('--temperature', type=float, default=1.0, help='Temperature for teacher probabilities')
+    parser.add_argument('--eval_interval', type=int, default=500, help='Interval for train/test NLL evaluation during distillation')
+    parser.add_argument('--eval_iters', type=int, default=1, help='Number of batches used for each train/test NLL evaluation')
     ## model hyperparameters
     parser.add_argument('--model', type=str, default='qcam', help='Model type to use')
 
@@ -38,13 +45,19 @@ def set_args():
     parser.add_argument('--activation', type=str, default='softmax', help='Activation function for EMADE model')
     
     args = parser.parse_args()
+    if args.distill and (args.trainer or args.sampler or args.tester):
+        parser.error('--distill must be run independently')
+    if args.distill and (args.bs <= 0 or args.block_size <= 0 or args.max_iters <= 0 or args.show <= 0 or args.temperature <= 0 or args.eval_interval <= 0 or args.eval_iters <= 0):
+        parser.error('Distillation requires positive bs, block_size, max_iters, show, temperature, eval_interval and eval_iters')
     mydevice = 'cpu' if args.device == '-1' else f'cuda:{args.device}'
     mydtype = torch.float32 if args.dtype == 'float32' else torch.float64
     if args.model == 'qcam' or args.model == 'eqcam':
         args.SAVE_PATH = args.SAVE_PATH + f'{args.model}/bs{args.bs}_block{args.block_size}_lr{args.lr}_depth{args.depth}_seed{args.seed}{args.text}'
     elif args.model == 'made' or args.model == 'emade':
         args.SAVE_PATH = args.SAVE_PATH + f'{args.model}/bs{args.bs}_block{args.block_size}_lr{args.lr}_{args.activation}_seed{args.seed}{args.text}'
-    if not os.path.exists(args.SAVE_PATH):
+    if args.distill:
+        args.SAVE_PATH = './lrdistill'
+    if not args.distill and not os.path.exists(args.SAVE_PATH):
         os.makedirs(args.SAVE_PATH)
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -315,6 +328,194 @@ def tester(args, device, dtype):
         test_loss = -torch.mean(log_likelihoods) / info['model_info']['block_size']
     print(f'Test NLL: {test_loss.item():.6f}')
 
+
+def _load_gpt2_teacher(path, device):
+    import tomllib
+    from models.gpt2 import GPT2LanguageModel
+    with open(os.path.join(path, 'info.toml'), 'rb') as f:
+        info = tomllib.load(f)['model_info']
+    if info['model'] != 'gpt2':
+        raise ValueError('Teacher must be a saved GPT2 model')
+    teacher_dtype = torch.float32 if info.get('dtype', 'float32') == 'float32' else torch.float64
+    # Loading the frozen teacher must not change a new student's initialization.
+    with torch.random.fork_rng(devices=[]):
+        teacher = GPT2LanguageModel(
+            vocab_size=info['vocab_size'], block_size=info['block_size'],
+            n_embd=info['n_embd'], n_head=info['n_head'],
+            n_layer=info['n_layer'], dropout=info['dropout']
+        ).to(device=device, dtype=teacher_dtype)
+    teacher.load_state_dict(torch.load(os.path.join(path, 'model_final.pth'), map_location=device))
+    teacher.eval()
+    teacher.requires_grad_(False)
+    return teacher, info
+
+
+def _make_distill_student(args, device, dtype):
+    import tomllib
+    student_path = args.student
+    num_qubits = 5
+    embedding_dim = 2 ** num_qubits
+    state = None
+    if student_path != 'default':
+        with open(os.path.join(student_path, 'info.toml'), 'rb') as f:
+            info = tomllib.load(f)['model_info']
+        args.model = info['model']
+        args.block_size = info['block_size']
+        args.depth = info['depth']
+        args.reset = info['reset']
+        args.proj = info['proj']
+        args.gate = info['gate']
+        num_qubits = info['num_qubits']
+        state = torch.load(os.path.join(student_path, 'model_final.pth'), map_location=device)
+        dtype = state['x_layers.0.0.weights'].dtype
+        if args.model == 'eqcam':
+            embedding_dim = state['x_layers.0.0.weights'].shape[-1]
+    if dtype != torch.float32:
+        raise ValueError('Current QCAM/EQCAM distillation supports float32 students')
+    args.dtype = 'float32'
+    source_text = text_module.TextLoader('./data/dialogues/train.txt', qubits=num_qubits, device=device)
+    length = args.block_size + 1
+    if args.model == 'qcam':
+        from qcam_seq import circuit
+        student = circuit.Circuit(length=length, num_qubits=source_text.qubits,
+                                  mydevice=device, mydtype=dtype, depth=args.depth,
+                                  reset=args.reset, proj=args.proj, gate=args.gate).to(device)
+    elif args.model == 'eqcam':
+        from qcam_seq import ecircuit
+        student = ecircuit.Circuit(embedding_dim=embedding_dim,
+                                   length=length, num_qubits=source_text.qubits,
+                                   mydevice=device, mydtype=dtype, depth=args.depth,
+                                   reset=args.reset, proj=args.proj, gate=args.gate).to(device)
+    else:
+        raise ValueError('Distillation student must be qcam or eqcam')
+    if student_path != 'default':
+        student.load_state_dict(state)
+    return student, source_text
+
+
+def _student_token_log_probs(student, prefixes, num_qubits):
+    # Evolve the observed prefix, then read the full next-token distribution.
+    batch_size = prefixes.shape[0]
+    padding = torch.zeros((batch_size, 1, num_qubits), dtype=prefixes.dtype, device=prefixes.device)
+    bits = torch.cat((prefixes, padding), dim=1)
+    states = student._initial_state(batch_size)
+    for position in range(prefixes.shape[1]):
+        states = student._block(states, bits, position)
+        states = student._collapse(states, bits[:, position])
+        if student.reset:
+            states = student._initial_state(batch_size)
+    states = student._block(states, bits, prefixes.shape[1])
+    probs = student._get_all_probs(states).reshape(batch_size, 2 ** num_qubits)
+    return torch.log(probs + 1e-9)
+
+
+def _student_sequence_log_probs(student, data, num_qubits):
+    """Return next-token log probabilities for every position in data."""
+    batch_size, length, _ = data.shape
+    states = student._initial_state(batch_size)
+    log_probs = []
+    for position in range(length):
+        states = student._block(states, data, position)
+        probs = student._get_all_probs(states).reshape(batch_size, 2 ** num_qubits)
+        log_probs.append(torch.log(probs + 1e-9))
+        states = student._collapse(states, data[:, position])
+        if student.reset:
+            states = student._initial_state(batch_size)
+    return torch.stack(log_probs, dim=1)
+
+
+@torch.no_grad()
+def _distill_nll(student, data, block_size, batch_size, eval_iters, device, shift):
+    student.eval()
+    losses = []
+    length = block_size + 1
+    for _ in range(eval_iters):
+        ix = torch.randint(len(data) - length, (batch_size,))
+        tokens = torch.stack([data[i:i + length] for i in ix]).to(device)
+        bits = ((tokens.unsqueeze(-1) >> shift) & 1).long()
+        losses.append((-student(bits, condition=True).mean() / block_size).item())
+    student.train()
+    return float(np.mean(losses))
+
+
+def distill(args, device, dtype):
+    teacher, teacher_info = _load_gpt2_teacher(args.teacher, device)
+    student, source_text = _make_distill_student(args, device, dtype)
+    import json
+    with open(os.path.join(args.teacher, 'vocab.json'), 'r', encoding='utf-8') as f:
+        teacher_chars = json.load(f)
+    train_text = source_text.text.lower()
+    test_source_text = text_module.TextLoader('./data/dialogues/test.txt', qubits=source_text.qubits, device=device)
+    test_text = test_source_text.text.lower()
+    chars = sorted(list(set(train_text)))
+    if chars != teacher_chars or len(chars) != 2 ** source_text.qubits:
+        raise ValueError('Teacher and student must use the same complete character vocabulary')
+    if args.block_size > teacher_info['block_size']:
+        raise ValueError('Student block_size must not exceed the teacher block_size')
+    if source_text.text != train_text:
+        raise ValueError('Student training text must use the same lowercase encoding as the teacher')
+    if len(train_text) <= args.block_size:
+        raise ValueError('Training text must be longer than block_size')
+    stoi = {ch: i for i, ch in enumerate(chars)}
+    data = torch.tensor([stoi[c] for c in train_text], dtype=torch.long, device=device)
+    test_data = torch.tensor([stoi[c] for c in test_text], dtype=torch.long, device=device)
+    optimizer = torch.optim.AdamW(student.parameters(), lr=args.lr)
+    source = 'default' if args.student == 'default' else 'pretrained'
+    save_path = os.path.join('./lrdistill', args.model,
+                            f'bs{args.bs}_block{args.block_size}_lr{args.lr}_depth{args.depth}_seed{args.seed}_{source}{args.text}')
+    args.SAVE_PATH = save_path
+    run = 1
+    while os.path.exists(args.SAVE_PATH):
+        args.SAVE_PATH = f'{save_path}_{run}'
+        run += 1
+    os.makedirs(args.SAVE_PATH)
+    save_info(source_text, args)
+    with open(os.path.join(args.SAVE_PATH, 'info.toml'), 'a') as f:
+        f.write(f'dtype = "{args.dtype}"\n')
+        if args.model == 'eqcam':
+            f.write(f'embedding_dim = {student.embedding_dim}\n')
+        f.write('\n[distill]\n')
+        f.write(f'teacher = {json.dumps(args.teacher)}\nstudent = {json.dumps(args.student)}\n')
+        f.write(f'temperature = {args.temperature}\n')
+    with open(os.path.join(args.SAVE_PATH, 'vocab.json'), 'w', encoding='utf-8') as f:
+        json.dump(chars, f)
+    print(f'Distillation results: {args.SAVE_PATH}')
+    records = []
+    train_nll_records = []
+    test_nll_records = []
+    student.train()
+    for iteration in range(args.max_iters):
+        length = args.block_size + 1
+        ix = torch.randint(len(data) - length, (args.bs,))
+        sequence = torch.stack([data[i:i + length] for i in ix])
+        x = sequence[:, :-1]
+        with torch.no_grad():
+            teacher_logits, _ = teacher(x)
+            teacher_probs = F.softmax(teacher_logits / args.temperature, dim=-1)
+        bits = ((sequence.unsqueeze(-1) >> source_text.shift) & 1).long()
+        student_log_probs = _student_sequence_log_probs(student, bits, source_text.qubits)[:, 1:]
+        loss = F.kl_div(student_log_probs.reshape(-1, student_log_probs.shape[-1]),
+                        teacher_probs.reshape(-1, teacher_probs.shape[-1]), reduction='batchmean')
+        optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        optimizer.step()
+        records.append(loss.item())
+        if iteration % args.show == 0:
+            print(f'Distill step {iteration}: loss {loss.item():.6f}')
+        if iteration % args.eval_interval == 0 or iteration == args.max_iters - 1:
+            train_nll = _distill_nll(student, data, args.block_size, args.bs, args.eval_iters, device, source_text.shift)
+            test_nll = _distill_nll(student, test_data, args.block_size, args.bs, args.eval_iters, device, source_text.shift)
+            train_nll_records.append(train_nll)
+            test_nll_records.append(test_nll)
+            print(f'Distill eval {iteration}: train NLL {train_nll:.6f}, test NLL {test_nll:.6f}')
+        if args.checkpoint > 0 and iteration % args.checkpoint == 0 and iteration > 0:
+            torch.save(student.state_dict(), os.path.join(args.SAVE_PATH, 'checkpoints', f'iter_{iteration}.pt'))
+    torch.save(student.state_dict(), os.path.join(args.SAVE_PATH, 'model_final.pth'))
+    np.savetxt(os.path.join(args.SAVE_PATH, 'distill_record.txt'), np.array(records))
+    np.savetxt(os.path.join(args.SAVE_PATH, 'train_nll.txt'), np.array(train_nll_records))
+    np.savetxt(os.path.join(args.SAVE_PATH, 'test_nll.txt'), np.array(test_nll_records))
+    return student
+
 if __name__ == "__main__":
     args, device, dtype = set_args()
     if args.trainer:
@@ -323,3 +524,5 @@ if __name__ == "__main__":
         sampler(args, device, dtype)
     if args.tester:
         tester(args, device, dtype)
+    if args.distill:
+        distill(args, device, dtype)

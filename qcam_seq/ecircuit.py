@@ -260,8 +260,10 @@ class Circuit(nn.Module):
                 # temperature = 0.8
                 # probs = torch.pow(probs, 1.0 / temperature)
                 # probs = probs / torch.sum(probs, dim=-1, keepdim=True)
+                # top_k = 6 # 只从概率前 5 名里选
                 # top_probs, top_indices = torch.topk(probs, top_k)
                 
+                # # 创建一个全 0 掩码，只保留 top-k 的值
                 # zeros = torch.zeros_like(probs)
                 # probs = zeros.scatter(1, top_indices, top_probs)
                 # probs = probs / torch.sum(probs, dim=-1, keepdim=True)
